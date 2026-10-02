@@ -135,7 +135,9 @@ export async function reviewPr(gh: Gh, token: string, repo: string, number: numb
   const seconds = (Date.now() - started) / 1000;
   db.prepare("INSERT INTO reviews (repo, number, head_sha, kind, score, approved, summary, comments, model, tokens_in, tokens_out, seconds, created_at) VALUES (?,?,?,'review',?,?,?,?,?,?,?,?,?)")
     .run(repo, number, sha, score, approved ? 1 : 0, out.summary, JSON.stringify(comments), config.llm.model, out.tokens_in, out.tokens_out, seconds, new Date().toISOString());
-  db.prepare("UPDATE prs SET reviewed_sha=?, failed_sha=NULL WHERE repo=? AND number=?").run(sha, repo, number);
+  db.prepare(`INSERT INTO prs (repo, number, title, url, author, state, head_sha, updated_at, comments_since, reviewed_sha)
+    VALUES (?,?,?,?,?,'open',?,?,?,?) ON CONFLICT(repo, number) DO UPDATE SET reviewed_sha=excluded.reviewed_sha, failed_sha=NULL`)
+    .run(repo, number, pr.title, pr.html_url, pr.user.login, sha, pr.updated_at, pr.created_at, sha);
   return { score, approved, comments: comments.length, seconds };
 }
 

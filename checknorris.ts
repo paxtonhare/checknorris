@@ -1,6 +1,7 @@
 // checknorris: polls GitHub for PRs that need a review or have new @mentions.
 // Usage: node checknorris.ts          poll forever (config.pollSeconds, default 60)
-//        node checknorris.ts once     one poll, print work, exit
+//        node checknorris.ts once     one poll tick (reviews and replies included), exit
+//        node checknorris.ts review <owner/repo> <number>   review one PR now
 //        node checknorris.ts list     print tracked PRs and unhandled mentions
 import { createSign } from "node:crypto";
 import fs from "node:fs";
@@ -130,7 +131,7 @@ if (import.meta.main) {
     for (const m of db.prepare("SELECT * FROM mentions WHERE handled=0").all() as any[])
       console.log(`mention ${m.repo}#${m.number} ${m.author}: ${m.body.split("\n")[0].slice(0, 80)}`);
   } else if (cmd === "once") {
-    await poll(printWork);
+    await poll(doWork);
   } else if (cmd === "review") {
     const [repo, n] = process.argv.slice(3);
     const { gh, token } = await forRepo(repo);

@@ -17,7 +17,7 @@ export const db = new DatabaseSync(dbPath === ":memory:" ? dbPath : path.join(ro
 db.exec(`
   CREATE TABLE IF NOT EXISTS prs (
     repo TEXT, number INTEGER, title TEXT, url TEXT, author TEXT, state TEXT,
-    head_sha TEXT, updated_at TEXT, reviewed_sha TEXT, comments_since TEXT,
+    head_sha TEXT, updated_at TEXT, reviewed_sha TEXT, failed_sha TEXT, comments_since TEXT,
     PRIMARY KEY (repo, number));
   CREATE TABLE IF NOT EXISTS mentions (
     id INTEGER PRIMARY KEY, repo TEXT, number INTEGER, kind TEXT, author TEXT, body TEXT,
@@ -47,18 +47,18 @@ export function client(auth: string): Gh {
 }
 
 const tokens = new Map<number, { token: string; exp: number }>();
-async function installationClient(inst: any): Promise<Gh> {
+async function installationClient(inst: any): Promise<{ gh: Gh; token: string }> {
   let t = tokens.get(inst.id);
   if (!t || t.exp < Date.now() + 60_000) {
     const r = await client(`Bearer ${appJwt()}`)(inst.access_tokens_url, { method: "POST" });
     t = { token: r.token, exp: Date.parse(r.expires_at) };
     tokens.set(inst.id, t);
   }
-  return client(`token ${t.token}`);
+  return { gh: client(`token ${t.token}`), token: t.token };
 }
 
 // --- polling ---
-export type Work = { reviews: { repo: string; number: number; head_sha: string }[]; mentions: any[] };
+export type Work = { reviews: { repo: string; number: number; head_sha: string }[]; mentions: { id: number; repo: string; number: number; kind: string; author: string; body: string }[] };
 
 const isMention = (body: string) => new RegExp(`(^|\\W)@${config.appSlug}\\b`, "i").test(body ?? "");
 
@@ -74,7 +74,7 @@ export async function scanRepo(gh: Gh, repo: string, work: Work) {
       title=excluded.title, state='open', head_sha=excluded.head_sha, updated_at=excluded.updated_at`)
       .run(repo, pr.number, pr.title, pr.html_url, pr.user.login, pr.head.sha, pr.updated_at, row?.comments_since ?? pr.created_at);
     if (pr.draft) continue;
-    if (row?.reviewed_sha !== pr.head.sha) work.reviews.push({ repo, number: pr.number, head_sha: pr.head.sha });
+    if (row?.reviewed_sha !== pr.head.sha && row?.failed_sha !== pr.head.sha) work.reviews.push({ repo, number: pr.number, head_sha: pr.head.sha });
     if (!row || row.updated_at !== pr.updated_at) await scanComments(gh, repo, pr.number, row?.comments_since ?? pr.created_at, work);
   }
 }
@@ -92,43 +92,69 @@ async function scanComments(gh: Gh, repo: string, number: number, since: string,
       addressed = parent.user.login === bot;
     }
     if (!addressed) continue;
-    db.prepare("INSERT OR IGNORE INTO mentions (id, repo, number, kind, author, body, url, created_at) VALUES (?,?,?,?,?,?,?,?)")
+    const ins = db.prepare("INSERT OR IGNORE INTO mentions (id, repo, number, kind, author, body, url, created_at) VALUES (?,?,?,?,?,?,?,?)")
       .run(c.id, repo, number, c.kind, c.user.login, c.body, c.html_url, c.created_at);
-    work.mentions.push({ id: c.id, repo, number, kind: c.kind, author: c.user.login, body: c.body });
+    if (ins.changes) work.mentions.push({ id: c.id, repo, number, kind: c.kind, author: c.user.login, body: c.body });
   }
   db.prepare("UPDATE prs SET comments_since=? WHERE repo=? AND number=?").run(latest, repo, number);
 }
 
-export async function poll(): Promise<Work> {
-  const work: Work = { reviews: [], mentions: [] };
+export async function poll(handle: (gh: Gh, token: string, work: Work) => Promise<void>) {
   for (const inst of await client(`Bearer ${appJwt()}`)("/app/installations")) {
-    const gh = await installationClient(inst);
+    const { gh, token } = await installationClient(inst);
     for (const r of (await gh("/installation/repositories?per_page=100")).repositories) {
-      await scanRepo(gh, r.full_name, work).catch((e) => console.error(`${r.full_name}: ${e.message}`));
+      const work: Work = { reviews: [], mentions: [] };
+      await scanRepo(gh, r.full_name, work).then(() => handle(gh, token, work)).catch((e) => console.error(`${r.full_name}: ${e.message}`));
     }
   }
-  return work;
 }
 
-function printWork(w: Work) {
-  for (const r of w.reviews) console.log(`review   ${r.repo}#${r.number} @ ${r.head_sha.slice(0, 7)}`);
-  for (const m of w.mentions) console.log(`mention  ${m.repo}#${m.number} ${m.author} (${m.kind}): ${m.body.split("\n")[0].slice(0, 80)}`);
+export async function forRepo(repo: string): Promise<{ gh: Gh; token: string }> {
+  for (const inst of await client(`Bearer ${appJwt()}`)("/app/installations")) {
+    const c = await installationClient(inst);
+    if ((await c.gh("/installation/repositories?per_page=100")).repositories.some((r: any) => r.full_name === repo)) return c;
+  }
+  throw new Error(`app not installed on ${repo}`);
+}
+
+const log = (s: string) => console.log(`${new Date().toISOString()} ${s}`);
+async function printWork(_gh: Gh, _token: string, w: Work) {
+  for (const r of w.reviews) log(`review   ${r.repo}#${r.number} @ ${r.head_sha.slice(0, 7)}`);
+  for (const m of w.mentions) log(`mention  ${m.repo}#${m.number} ${m.author} (${m.kind}): ${m.body.split("\n")[0].slice(0, 80)}`);
+}
+async function doWork(gh: Gh, token: string, w: Work) {
+  const { reviewPr, replyToMention } = await import("./review.ts");
+  await printWork(gh, token, w);
+  for (const r of w.reviews) {
+    await reviewPr(gh, token, r.repo, r.number)
+      .then((o) => log(`reviewed ${r.repo}#${r.number}: ${o.score}/5${o.approved ? " approved" : ""}, ${o.comments} comments, ${o.seconds.toFixed(0)}s`))
+      .catch((e) => { log(`review failed ${r.repo}#${r.number}: ${e.message}`); db.prepare("UPDATE prs SET failed_sha=? WHERE repo=? AND number=?").run(r.head_sha, r.repo, r.number); });
+  }
+  for (const m of w.mentions) {
+    await replyToMention(gh, token, m)
+      .then(() => log(`replied  ${m.repo}#${m.number} to ${m.author}`))
+      .catch((e) => { log(`reply failed ${m.repo}#${m.number}: ${e.message}`); db.prepare("UPDATE mentions SET handled=-1 WHERE id=?").run(m.id); });
+  }
 }
 
 if (import.meta.main) {
   const cmd = process.argv[2] ?? "loop";
   if (cmd === "list") {
     for (const p of db.prepare("SELECT * FROM prs ORDER BY state, repo, number").all() as any[])
-      console.log(`${p.state.padEnd(6)} ${p.repo}#${p.number} ${p.head_sha.slice(0, 7)} ${p.reviewed_sha === p.head_sha ? "reviewed" : "pending "} ${p.title}`);
+      console.log(`${p.state.padEnd(6)} ${p.repo}#${p.number} ${p.head_sha.slice(0, 7)} ${p.reviewed_sha === p.head_sha ? "reviewed" : p.failed_sha === p.head_sha ? "failed  " : "pending "} ${p.title}`);
     for (const m of db.prepare("SELECT * FROM mentions WHERE handled=0").all() as any[])
       console.log(`mention ${m.repo}#${m.number} ${m.author}: ${m.body.split("\n")[0].slice(0, 80)}`);
   } else if (cmd === "once") {
-    printWork(await poll());
+    await poll(printWork);
+  } else if (cmd === "review") {
+    const [repo, n] = process.argv.slice(3);
+    const { gh, token } = await forRepo(repo);
+    await doWork(gh, token, { reviews: [{ repo, number: Number(n), head_sha: "" }], mentions: [] });
   } else {
     const every = (config.pollSeconds ?? 60) * 1000;
     while (true) {
       const started = Date.now();
-      await poll().then(printWork, (e) => console.error(`poll: ${e.message}`));
+      await poll(doWork).catch((e) => console.error(`poll: ${e.message}`));
       await new Promise((r) => setTimeout(r, Math.max(0, every - (Date.now() - started))));
     }
   }

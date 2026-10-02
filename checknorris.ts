@@ -12,7 +12,8 @@ export const config = JSON.parse(fs.readFileSync(path.join(root, "config.json"),
 const bot = `${config.appSlug}[bot]`;
 const api = "https://api.github.com";
 
-export const db = new DatabaseSync(path.join(root, process.env.CHECKNORRIS_DB ?? config.db ?? "checknorris.db"));
+const dbPath = process.env.CHECKNORRIS_DB ?? config.db ?? "checknorris.db";
+export const db = new DatabaseSync(dbPath === ":memory:" ? dbPath : path.join(root, dbPath));
 db.exec(`
   CREATE TABLE IF NOT EXISTS prs (
     repo TEXT, number INTEGER, title TEXT, url TEXT, author TEXT, state TEXT,

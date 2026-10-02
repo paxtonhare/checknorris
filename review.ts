@@ -31,7 +31,7 @@ function checkout(repo: string, sha: string, baseSha: string, token: string) {
     git(dir, ["clone", "--quiet", "--no-checkout", "--filter=blob:none", `https://github.com/${repo}.git`, "."], token);
   }
   git(dir, ["fetch", "--quiet", "origin", sha, baseSha], token);
-  git(dir, ["checkout", "--quiet", "--force", "--detach", sha]);
+  git(dir, ["checkout", "--quiet", "--force", "--detach", sha], token); // partial clone: checkout lazily fetches blobs
   return dir;
 }
 
@@ -94,9 +94,9 @@ async function agent(dir: string, system: string, user: string) {
 }
 
 // Instructions come from the PR's base commit, not its head: a PR must not be able to rewrite its own reviewer's rules.
-function repoInstructions(dir: string, baseSha: string) {
+function repoInstructions(dir: string, baseSha: string, token: string) {
   for (const f of [".checknorris.md", "AGENTS.md", "CLAUDE.md"]) {
-    try { return `\n\n# Repository instructions (${f})\n${git(dir, ["show", `${baseSha}:${f}`]).slice(0, 20_000)}`; } catch {}
+    try { return `\n\n# Repository instructions (${f})\n${git(dir, ["show", `${baseSha}:${f}`], token).slice(0, 20_000)}`; } catch {}
   }
   return "";
 }
@@ -124,7 +124,7 @@ export async function reviewPr(gh: Gh, token: string, repo: string, number: numb
   const dir = checkout(repo, sha, pr.base.sha, token);
   const diff = await gh(`/repos/${repo}/pulls/${number}`, { headers: { accept: "application/vnd.github.diff" } });
   const user = `# PR #${number}: ${pr.title}\nAuthor: ${pr.user.login}. Base: ${pr.base.ref}. Head: ${sha}.\n\n${pr.body ?? ""}\n\n# Diff\n\`\`\`diff\n${String(diff).slice(0, 200_000)}\n\`\`\``;
-  const out = await agent(dir, SYSTEM + repoInstructions(dir, pr.base.sha) + priorFindings(repo, number), user);
+  const out = await agent(dir, SYSTEM + repoInstructions(dir, pr.base.sha, token) + priorFindings(repo, number), user);
   const comments: any[] = out.comments ?? [];
   let score = Math.min(5, Math.max(1, Math.round(out.score ?? 3)));
   if (score === 5 && comments.some((c) => c.severity !== "P2")) score = 4;
@@ -153,17 +153,18 @@ export async function replyToMention(gh: Gh, token: string, m: { id: number; rep
   const started = Date.now();
   const pr = await gh(`/repos/${m.repo}/pulls/${m.number}`);
   const dir = checkout(m.repo, pr.head.sha, pr.base.sha, token);
-  let context = "";
+  let context = "", threadId = m.id;
   if (m.kind === "review") {
     const c = await gh(`/repos/${m.repo}/pulls/comments/${m.id}`);
+    threadId = c.in_reply_to_id ?? c.id; // replies must target the thread's top-level comment
     context = `\nThe comment is a reply on ${c.path} line ${c.line ?? c.original_line}.\n`;
     if (c.in_reply_to_id) { const p = await gh(`/repos/${m.repo}/pulls/comments/${c.in_reply_to_id}`); context += `Your earlier comment there:\n> ${p.body.replaceAll("\n", "\n> ")}\n`; }
   }
   const rereview = /re-?review|review again|take another look/i.test(m.body);
   const user = `# PR #${m.number}: ${pr.title}\nHead: ${pr.head.sha}.\n${context}\n@${m.author} wrote:\n> ${m.body.replaceAll("\n", "\n> ")}\n\nAnswer them directly and briefly, using the tools to check the code first. Put the reply in \`summary\`.${rereview ? " A fresh full review is already being scheduled; say so." : ""}`;
-  const out = await agent(dir, SYSTEM + repoInstructions(dir, pr.base.sha) + priorFindings(m.repo, m.number), user);
+  const out = await agent(dir, SYSTEM + repoInstructions(dir, pr.base.sha, token) + priorFindings(m.repo, m.number), user);
   const reply = `${out.summary}\n\n<sub>Check Norris · ${config.llm.model}</sub>`;
-  if (m.kind === "review") await gh(`/repos/${m.repo}/pulls/${m.number}/comments/${m.id}/replies`, { method: "POST", body: JSON.stringify({ body: reply }) });
+  if (m.kind === "review") await gh(`/repos/${m.repo}/pulls/${m.number}/comments/${threadId}/replies`, { method: "POST", body: JSON.stringify({ body: reply }) });
   else await gh(`/repos/${m.repo}/issues/${m.number}/comments`, { method: "POST", body: JSON.stringify({ body: reply }) });
   db.prepare("INSERT INTO reviews (repo, number, head_sha, kind, summary, model, tokens_in, tokens_out, seconds, created_at) VALUES (?,?,?,'reply',?,?,?,?,?,?)")
     .run(m.repo, m.number, pr.head.sha, out.summary, config.llm.model, out.tokens_in, out.tokens_out, (Date.now() - started) / 1000, new Date().toISOString());

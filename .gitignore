@@ -1,0 +1,6 @@
+config.json
+*.pem
+node_modules/
+*.db
+*.db-*
+checkouts/

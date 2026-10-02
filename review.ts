@@ -2,7 +2,7 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { config, db, type Gh } from "./checknorris.ts";
+import { config, db, type Gh } from "./common.ts";
 
 const root = import.meta.dirname;
 const SEVERITY = { P0: "🛑 P0", P1: "⚠️ P1", P2: "💡 P2" } as const;
@@ -13,18 +13,24 @@ db.exec(`CREATE TABLE IF NOT EXISTS reviews (
 
 // --- checkout ---
 function git(dir: string, args: string[], token?: string) {
-  const auth = token ? ["-c", `http.extraheader=AUTHORIZATION: bearer ${token}`] : [];
-  return execFileSync("git", [...auth, ...args], { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 << 20 });
+  const auth = token ? ["-c", `http.extraheader=AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`] : [];
+  // GIT_CEILING_DIRECTORIES: never let git walk up out of checkouts/ into this repo (a failed clone leaves an empty dir).
+  const env = { ...process.env, GIT_TERMINAL_PROMPT: "0", GIT_CEILING_DIRECTORIES: path.join(root, "checkouts") };
+  try {
+    return execFileSync("git", [...auth, ...args], { cwd: dir, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 << 20 });
+  } catch (e: any) {
+    throw new Error(`git ${args[0]}: ${String(e.stderr || e.message).trim().slice(0, 300)}`);
+  }
 }
 
 // ponytail: one clone per repo, checked out in place; reviews run one at a time so no worktrees.
-function checkout(repo: string, sha: string, token: string) {
+function checkout(repo: string, sha: string, baseSha: string, token: string) {
   const dir = path.join(root, "checkouts", repo.replace("/", "__"));
-  if (!fs.existsSync(dir)) {
+  if (!fs.existsSync(path.join(dir, ".git"))) {
     fs.mkdirSync(dir, { recursive: true });
     git(dir, ["clone", "--quiet", "--no-checkout", "--filter=blob:none", `https://github.com/${repo}.git`, "."], token);
   }
-  git(dir, ["fetch", "--quiet", "origin", sha], token);
+  git(dir, ["fetch", "--quiet", "origin", sha, baseSha], token);
   git(dir, ["checkout", "--quiet", "--force", "--detach", sha]);
   return dir;
 }
@@ -42,7 +48,12 @@ const tools = [
 ].map((f) => ({ type: "function", function: f }));
 
 function runTool(dir: string, name: string, a: any): string {
-  const safe = (p = ".") => { const r = path.resolve(dir, p); if (!r.startsWith(dir)) throw new Error("path outside checkout"); return path.relative(dir, r) || "."; };
+  const safe = (p = ".") => {
+    // Reject anything that resolves (after symlinks) outside the checkout: a PR could add a symlink to ../../config.json.
+    const r = path.resolve(dir, p), real = fs.existsSync(r) ? fs.realpathSync(r) : r;
+    if (real !== dir && !real.startsWith(dir + path.sep)) throw new Error("path outside checkout");
+    return path.relative(dir, r) || ".";
+  };
   const cap = (s: string, n = 400) => { const l = s.split("\n"); return l.length > n ? l.slice(0, n).join("\n") + `\n… (${l.length - n} more lines)` : s; };
   try {
     if (name === "read") {
@@ -61,6 +72,7 @@ async function agent(dir: string, system: string, user: string) {
   const messages: any[] = [{ role: "system", content: system }, { role: "user", content: user }];
   let tokens_in = 0, tokens_out = 0;
   for (let turn = 0; turn < (config.maxTurns ?? 60); turn++) {
+    if (process.env.DEBUG) console.error(`llm turn ${turn}, ${messages.length} messages`);
     const r = await fetch(`${config.llm.baseUrl}/chat/completions`, {
       method: "POST", signal: AbortSignal.timeout(600_000),
       headers: { authorization: `Bearer ${config.llm.apiKey}`, "content-type": "application/json" },
@@ -81,10 +93,10 @@ async function agent(dir: string, system: string, user: string) {
   throw new Error("agent hit maxTurns without calling done");
 }
 
-function repoInstructions(dir: string) {
+// Instructions come from the PR's base commit, not its head: a PR must not be able to rewrite its own reviewer's rules.
+function repoInstructions(dir: string, baseSha: string) {
   for (const f of [".checknorris.md", "AGENTS.md", "CLAUDE.md"]) {
-    const p = path.join(dir, f);
-    if (fs.existsSync(p)) return `\n\n# Repository instructions (${f})\n${fs.readFileSync(p, "utf8").slice(0, 20_000)}`;
+    try { return `\n\n# Repository instructions (${f})\n${git(dir, ["show", `${baseSha}:${f}`]).slice(0, 20_000)}`; } catch {}
   }
   return "";
 }
@@ -109,10 +121,10 @@ export async function reviewPr(gh: Gh, token: string, repo: string, number: numb
   const started = Date.now();
   const pr = await gh(`/repos/${repo}/pulls/${number}`);
   const sha = pr.head.sha;
-  const dir = checkout(repo, sha, token);
+  const dir = checkout(repo, sha, pr.base.sha, token);
   const diff = await gh(`/repos/${repo}/pulls/${number}`, { headers: { accept: "application/vnd.github.diff" } });
   const user = `# PR #${number}: ${pr.title}\nAuthor: ${pr.user.login}. Base: ${pr.base.ref}. Head: ${sha}.\n\n${pr.body ?? ""}\n\n# Diff\n\`\`\`diff\n${String(diff).slice(0, 200_000)}\n\`\`\``;
-  const out = await agent(dir, SYSTEM + repoInstructions(dir) + priorFindings(repo, number), user);
+  const out = await agent(dir, SYSTEM + repoInstructions(dir, pr.base.sha) + priorFindings(repo, number), user);
   const comments: any[] = out.comments ?? [];
   let score = Math.min(5, Math.max(1, Math.round(out.score ?? 3)));
   if (score === 5 && comments.some((c) => c.severity !== "P2")) score = 4;
@@ -140,7 +152,7 @@ async function postReview(gh: Gh, repo: string, number: number, sha: string, app
 export async function replyToMention(gh: Gh, token: string, m: { id: number; repo: string; number: number; kind: string; author: string; body: string }) {
   const started = Date.now();
   const pr = await gh(`/repos/${m.repo}/pulls/${m.number}`);
-  const dir = checkout(m.repo, pr.head.sha, token);
+  const dir = checkout(m.repo, pr.head.sha, pr.base.sha, token);
   let context = "";
   if (m.kind === "review") {
     const c = await gh(`/repos/${m.repo}/pulls/comments/${m.id}`);
@@ -149,7 +161,7 @@ export async function replyToMention(gh: Gh, token: string, m: { id: number; rep
   }
   const rereview = /re-?review|review again|take another look/i.test(m.body);
   const user = `# PR #${m.number}: ${pr.title}\nHead: ${pr.head.sha}.\n${context}\n@${m.author} wrote:\n> ${m.body.replaceAll("\n", "\n> ")}\n\nAnswer them directly and briefly, using the tools to check the code first. Put the reply in \`summary\`.${rereview ? " A fresh full review is already being scheduled; say so." : ""}`;
-  const out = await agent(dir, SYSTEM + repoInstructions(dir) + priorFindings(m.repo, m.number), user);
+  const out = await agent(dir, SYSTEM + repoInstructions(dir, pr.base.sha) + priorFindings(m.repo, m.number), user);
   const reply = `${out.summary}\n\n<sub>Check Norris · ${config.llm.model}</sub>`;
   if (m.kind === "review") await gh(`/repos/${m.repo}/pulls/${m.number}/comments/${m.id}/replies`, { method: "POST", body: JSON.stringify({ body: reply }) });
   else await gh(`/repos/${m.repo}/issues/${m.number}/comments`, { method: "POST", body: JSON.stringify({ body: reply }) });

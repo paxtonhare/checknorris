@@ -5,26 +5,11 @@
 import { createSign } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
+import { bot, config, db, type Gh } from "./common.ts";
+import { replyToMention, reviewPr } from "./review.ts";
 
 const root = import.meta.dirname;
-export const config = JSON.parse(fs.readFileSync(path.join(root, "config.json"), "utf8"));
-const bot = `${config.appSlug}[bot]`;
 const api = "https://api.github.com";
-
-const dbPath = process.env.CHECKNORRIS_DB ?? config.db ?? "checknorris.db";
-export const db = new DatabaseSync(dbPath === ":memory:" ? dbPath : path.join(root, dbPath));
-db.exec(`
-  CREATE TABLE IF NOT EXISTS prs (
-    repo TEXT, number INTEGER, title TEXT, url TEXT, author TEXT, state TEXT,
-    head_sha TEXT, updated_at TEXT, reviewed_sha TEXT, failed_sha TEXT, comments_since TEXT,
-    PRIMARY KEY (repo, number));
-  CREATE TABLE IF NOT EXISTS mentions (
-    id INTEGER PRIMARY KEY, repo TEXT, number INTEGER, kind TEXT, author TEXT, body TEXT,
-    url TEXT, created_at TEXT, handled INTEGER DEFAULT 0);
-`);
-
-export type Gh = (p: string, init?: RequestInit) => Promise<any>;
 
 // --- GitHub App auth ---
 function appJwt() {
@@ -42,7 +27,7 @@ export function client(auth: string): Gh {
       headers: { authorization: auth, accept: "application/vnd.github+json", "user-agent": "checknorris", ...init?.headers },
     });
     if (!r.ok) throw new Error(`${init?.method ?? "GET"} ${p}: ${r.status} ${await r.text()}`);
-    return r.status === 204 ? null : r.json();
+    return r.status === 204 ? null : r.headers.get("content-type")?.includes("json") ? r.json() : r.text();
   };
 }
 
@@ -58,7 +43,7 @@ async function installationClient(inst: any): Promise<{ gh: Gh; token: string }>
 }
 
 // --- polling ---
-export type Work = { reviews: { repo: string; number: number; head_sha: string }[]; mentions: { id: number; repo: string; number: number; kind: string; author: string; body: string }[] };
+export type Work = { repo: string; reviews: { repo: string; number: number; head_sha: string }[]; mentions: { id: number; repo: string; number: number; kind: string; author: string; body: string }[] };
 
 const isMention = (body: string) => new RegExp(`(^|\\W)@${config.appSlug}\\b`, "i").test(body ?? "");
 
@@ -103,7 +88,7 @@ export async function poll(handle: (gh: Gh, token: string, work: Work) => Promis
   for (const inst of await client(`Bearer ${appJwt()}`)("/app/installations")) {
     const { gh, token } = await installationClient(inst);
     for (const r of (await gh("/installation/repositories?per_page=100")).repositories) {
-      const work: Work = { reviews: [], mentions: [] };
+      const work: Work = { repo: r.full_name, reviews: [], mentions: [] };
       await scanRepo(gh, r.full_name, work).then(() => handle(gh, token, work)).catch((e) => console.error(`${r.full_name}: ${e.message}`));
     }
   }
@@ -123,14 +108,14 @@ async function printWork(_gh: Gh, _token: string, w: Work) {
   for (const m of w.mentions) log(`mention  ${m.repo}#${m.number} ${m.author} (${m.kind}): ${m.body.split("\n")[0].slice(0, 80)}`);
 }
 async function doWork(gh: Gh, token: string, w: Work) {
-  const { reviewPr, replyToMention } = await import("./review.ts");
   await printWork(gh, token, w);
   for (const r of w.reviews) {
     await reviewPr(gh, token, r.repo, r.number)
       .then((o) => log(`reviewed ${r.repo}#${r.number}: ${o.score}/5${o.approved ? " approved" : ""}, ${o.comments} comments, ${o.seconds.toFixed(0)}s`))
       .catch((e) => { log(`review failed ${r.repo}#${r.number}: ${e.message}`); db.prepare("UPDATE prs SET failed_sha=? WHERE repo=? AND number=?").run(r.head_sha, r.repo, r.number); });
   }
-  for (const m of w.mentions) {
+  // From the DB, not w.mentions: a mention scanned by `once` or before a crash is still owed a reply.
+  for (const m of db.prepare("SELECT id, repo, number, kind, author, body FROM mentions WHERE repo=? AND handled=0").all(w.repo) as Work["mentions"]) {
     await replyToMention(gh, token, m)
       .then(() => log(`replied  ${m.repo}#${m.number} to ${m.author}`))
       .catch((e) => { log(`reply failed ${m.repo}#${m.number}: ${e.message}`); db.prepare("UPDATE mentions SET handled=-1 WHERE id=?").run(m.id); });
@@ -149,7 +134,7 @@ if (import.meta.main) {
   } else if (cmd === "review") {
     const [repo, n] = process.argv.slice(3);
     const { gh, token } = await forRepo(repo);
-    await doWork(gh, token, { reviews: [{ repo, number: Number(n), head_sha: "" }], mentions: [] });
+    await doWork(gh, token, { repo, reviews: [{ repo, number: Number(n), head_sha: "" }], mentions: [] });
   } else {
     const every = (config.pollSeconds ?? 60) * 1000;
     while (true) {

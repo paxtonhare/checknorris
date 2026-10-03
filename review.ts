@@ -136,12 +136,12 @@ export async function reviewPr(gh: Gh, token: () => Promise<string>, repo: strin
   const seconds = (Date.now() - started) / 1000, at = new Date().toISOString();
   db.prepare("INSERT INTO reviews (repo, number, head_sha, kind, score, approved, summary, comments, model, tokens_in, tokens_out, seconds, created_at) VALUES (?,?,?,'review',?,?,?,?,?,?,?,?,?)")
     .run(repo, number, sha, score, approved ? 1 : 0, out.summary, JSON.stringify(comments), config.llm.model, out.tokens_in, out.tokens_out, seconds, at);
-  db.prepare(`INSERT INTO prs (repo, number, title, url, author, state, head_sha, updated_at, comments_since, reviewed_sha)
-    VALUES (?,?,?,?,?,'open',?,?,?,?) ON CONFLICT(repo, number) DO UPDATE SET reviewed_sha=excluded.reviewed_sha, failed_sha=NULL, failures=0`)
-    .run(repo, number, pr.title, pr.html_url, pr.user.login, sha, pr.updated_at, pr.created_at, sha);
+  db.prepare("INSERT OR IGNORE INTO prs (repo, number, title, url, author, state, head_sha, updated_at, comments_since) VALUES (?,?,?,?,?,'open',?,?,?)")
+    .run(repo, number, pr.title, pr.html_url, pr.user.login, sha, pr.updated_at, pr.created_at); // `review` command on an unseen PR
   await upsertSummary(gh, repo, number, sha);
   await postReview(gh, repo, number, sha, approved, comments);
   await gh(`/repos/${repo}/statuses/${sha}`, { method: "POST", body: JSON.stringify({ context: "checknorris", state: approved ? "success" : "failure", description: `Score ${score}/5` }) });
+  db.prepare("UPDATE prs SET reviewed_sha=?, failed_sha=NULL, failures=0 WHERE repo=? AND number=?").run(sha, repo, number); // only once everything is published
   return { score, approved, comments: comments.length, seconds };
 }
 

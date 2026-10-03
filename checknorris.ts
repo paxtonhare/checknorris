@@ -1,5 +1,5 @@
 // checknorris: polls GitHub for PRs that need a review or have new @mentions.
-// Usage: node checknorris.ts          poll forever (config.pollSeconds, default 60)
+// Usage: node checknorris.ts          poll forever (config.pollSeconds, default 60) and serve the dashboard (config.port, default 3940)
 //        node checknorris.ts once     one poll tick (reviews and replies included), exit
 //        node checknorris.ts review <owner/repo> <number>   review one PR now
 //        node checknorris.ts list     print tracked PRs and unhandled mentions
@@ -7,6 +7,7 @@ import { createSign } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { bot, config, db, type Gh } from "./common.ts";
+import { serve } from "./dashboard.ts";
 import { replyToMention, reviewPr } from "./review.ts";
 
 const root = import.meta.dirname;
@@ -112,6 +113,7 @@ export async function forRepo(repo: string): Promise<{ gh: Gh; token: () => Prom
 }
 
 const log = (s: string) => console.log(`${new Date().toISOString()} ${s}`);
+const why = (e: any) => `${e.message}${e.cause?.message ? ` (${e.cause.message})` : ""}`;
 async function printWork(_gh: Gh, _token: unknown, w: Work) {
   for (const r of w.reviews) log(`review   ${r.repo}#${r.number} @ ${r.head_sha.slice(0, 7)}`);
   for (const m of w.mentions) log(`mention  ${m.repo}#${m.number} ${m.author} (${m.kind}): ${m.body.split("\n")[0].slice(0, 80)}`);
@@ -123,12 +125,12 @@ async function doWork(gh: Gh, token: () => Promise<string>, w: Work) {
   for (const m of db.prepare("SELECT id, repo, number, kind, author, body FROM mentions WHERE repo=? AND handled<=0 AND handled>-3").all(w.repo) as Work["mentions"]) {
     await replyToMention(gh, token, m)
       .then(() => log(`replied  ${m.repo}#${m.number} to ${m.author}`))
-      .catch((e) => { log(`reply failed ${m.repo}#${m.number}: ${e.message}`); if (!/\b401\b/.test(e.message)) db.prepare("UPDATE mentions SET handled=handled-1 WHERE id=?").run(m.id); }); // ponytail: handled 1 done, 0..-2 pending, -3 given up; a lost reply is low-stakes and re-mentionable
+      .catch((e) => { log(`reply failed ${m.repo}#${m.number}: ${why(e)}`); if (!/\b401\b/.test(e.message)) db.prepare("UPDATE mentions SET handled=handled-1 WHERE id=?").run(m.id); }); // ponytail: handled 1 done, 0..-2 pending, -3 given up; a lost reply is low-stakes and re-mentionable
   }
   for (const r of w.reviews) {
     await reviewPr(gh, token, r.repo, r.number)
       .then((o) => log(`reviewed ${r.repo}#${r.number}: ${o.score}/5${o.approved ? " approved" : ""}, ${o.comments} comments, ${o.seconds.toFixed(0)}s`))
-      .catch((e) => { log(`review failed ${r.repo}#${r.number}: ${e.message}`); if (!/\b401\b/.test(e.message)) db.prepare("UPDATE prs SET failures=CASE WHEN failed_sha=? THEN failures+1 ELSE 1 END, failed_sha=?, failed_at=? WHERE repo=? AND number=?").run(r.head_sha, r.head_sha, new Date().toISOString(), r.repo, r.number); });
+      .catch((e) => { log(`review failed ${r.repo}#${r.number}: ${why(e)}`); if (!/\b401\b/.test(e.message)) db.prepare("UPDATE prs SET failures=CASE WHEN failed_sha=? THEN failures+1 ELSE 1 END, failed_sha=?, failed_at=? WHERE repo=? AND number=?").run(r.head_sha, r.head_sha, new Date().toISOString(), r.repo, r.number); });
   }
 }
 
@@ -146,6 +148,7 @@ if (import.meta.main) {
     const { gh, token } = await forRepo(repo);
     await doWork(gh, token, { repo, reviews: [{ repo, number: Number(n), head_sha: "" }], mentions: [] });
   } else {
+    serve();
     const every = (config.pollSeconds ?? 60) * 1000;
     while (true) {
       const started = Date.now();

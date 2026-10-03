@@ -30,10 +30,10 @@ async function checkout(repo: string, sha: string, baseSha: string, getToken: ()
   const dir = path.join(root, "checkouts", repo.replace("/", "__"));
   if (!fs.existsSync(path.join(dir, ".git"))) {
     fs.mkdirSync(dir, { recursive: true });
-    git(dir, ["clone", "--quiet", "--no-checkout", "--filter=blob:none", `https://github.com/${repo}.git`, "."], token);
+    git(dir, ["clone", "--quiet", "--no-checkout", `https://github.com/${repo}.git`, "."], token);
   }
   git(dir, ["fetch", "--quiet", "origin", sha, baseSha], token);
-  git(dir, ["checkout", "--quiet", "--force", "--detach", sha], token); // partial clone: checkout lazily fetches blobs
+  git(dir, ["checkout", "--quiet", "--force", "--detach", sha]);
   return dir;
 }
 

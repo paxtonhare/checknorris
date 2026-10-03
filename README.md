@@ -50,7 +50,19 @@ localhost) and do not expose the dashboard to the internet.
 }
 ```
 
-4. `node checknorris.ts` (Node 24+, no dependencies).
+4. `node checknorris.ts` (Node 24+, no dependencies). Dashboard on `http://127.0.0.1:3940`.
+
+### Running it on a Linux box
+
+`scripts/deploy.sh <ssh-host>` installs Node under `~/.local/node`, rsyncs the
+code and config, and starts a user-level systemd service (`loginctl
+enable-linger` once so it survives logout). Then expose the dashboard on your
+tailnet with `tailscale serve --bg 3940` (after `sudo tailscale set
+--operator=$USER` once).
+
+Other commands: `node checknorris.ts once` runs one tick; `node checknorris.ts
+review <owner/repo> <n>` reviews one PR now; `node checknorris.ts list` prints
+state.
 
 ## License
 

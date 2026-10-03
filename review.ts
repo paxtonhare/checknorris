@@ -131,8 +131,8 @@ export async function reviewPr(gh: Gh, token: () => Promise<string>, repo: strin
   const out = await agent(dir, SYSTEM + (await repoInstructions(dir, pr.base.sha, token)) + priorFindings(repo, number), user);
   const comments: any[] = out.comments ?? [];
   let score = Math.min(5, Math.max(1, Math.round(out.score ?? 3)));
-  if (score === 5 && (truncated || comments.some((c) => c.severity !== "P2"))) score = 4; // never approve on an incomplete diff
-  const approved = score >= (config.approveThreshold ?? 5);
+  if (score === 5 && comments.some((c) => c.severity !== "P2")) score = 4;
+  const approved = !truncated && score >= (config.approveThreshold ?? 5); // never approve on an incomplete diff
   const body = `${out.summary}\n\n**Score: ${score}/5**${approved ? " · Approved" : ""}\n\n<sub>Check Norris · ${config.llm.model}</sub>`;
   await postReview(gh, repo, number, sha, approved, body, comments);
   await gh(`/repos/${repo}/statuses/${sha}`, { method: "POST", body: JSON.stringify({ context: "checknorris", state: approved ? "success" : "failure", description: `Score ${score}/5` }) });

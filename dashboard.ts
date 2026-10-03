@@ -2,10 +2,11 @@
 // No auth: bind to localhost and expose over Tailscale (tailscale serve) or another private network.
 import http from "node:http";
 import { config, db } from "./common.ts";
+import { LABEL } from "./review.ts";
 
 const esc = (s: unknown) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]!);
 const ago = (iso?: string) => { if (!iso) return ""; const m = (Date.now() - Date.parse(iso)) / 60_000; return m < 60 ? `${m | 0}m` : m < 1440 ? `${(m / 60) | 0}h` : `${(m / 1440) | 0}d`; };
-const score = (r: any) => r?.score == null ? "" : `<b class="s${r.score}">${r.score}/5</b>${r.approved ? " ✓" : ""}`;
+const score = (r: any) => r?.score == null ? "" : `<b class="s${r.score}">${r.score}/5</b> <span class="mute">${LABEL[r.score]}</span>${r.approved ? " ✓" : ""}`;
 
 const page = (title: string, body: string) => `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${esc(title)} · Check Norris</title>
 <style>
@@ -37,7 +38,7 @@ function pr(repo: string, number: number) {
   const runs = db.prepare("SELECT * FROM reviews WHERE repo=? AND number=? ORDER BY id DESC").all(repo, number) as any[];
   const mentions = db.prepare("SELECT * FROM mentions WHERE repo=? AND number=? ORDER BY id DESC").all(repo, number) as any[];
   const run = (r: any) => `<h2>${r.kind} · ${score(r)} <span class="mute" style="font-weight:400;font-size:.85rem">${esc(r.head_sha.slice(0, 7))} · ${esc(r.model)} · ${r.seconds?.toFixed(0)}s · ${r.tokens_in?.toLocaleString()} in / ${r.tokens_out?.toLocaleString()} out · ${ago(r.created_at)} ago</span></h2>
-    <div class="body">${esc(r.summary)}</div>${JSON.parse(r.comments || "[]").map((c: any) => `<div class="c"><b>${esc(c.severity)}</b> <code>${esc(c.path)}:${c.line}</code><br>${esc(c.body)}</div>`).join("")}`;
+    <div class="body">${esc(r.summary)}</div>${r.rationale ? `<p><b>Why ${r.score}/5</b></p><div class="body">${esc(r.rationale)}</div>` : ""}${JSON.parse(r.comments || "[]").map((c: any) => `<div class="c"><b>${esc(c.severity)}</b> <code>${esc(c.path)}:${c.line}</code><br>${esc(c.body)}</div>`).join("")}`;
   return page(`${repo}#${number}`, `<p><a href="${esc(p.url)}">${esc(repo)}#${number}</a> ${esc(p.title)} <span class="mute">by ${esc(p.author)} · ${esc(p.state)} · head ${esc(p.head_sha.slice(0, 7))}
     ${p.reviewed_sha === p.head_sha ? "reviewed" : p.failed_sha === p.head_sha ? `failed ×${p.failures}` : "pending"}</span>
     <form method="post" action="/rerun" style="display:inline"><input type="hidden" name="repo" value="${esc(repo)}"><input type="hidden" name="number" value="${number}"><button>Re-run review</button></form></p>

@@ -21,26 +21,32 @@ function appJwt() {
   return `${head}.${createSign("RSA-SHA256").update(head).sign(pem, "base64url")}`;
 }
 
-export function client(auth: string): Gh {
+export function client(auth: () => Promise<string>): Gh {
   return async (p, init) => {
     const r = await fetch(p.startsWith("http") ? p : api + p, {
       ...init,
-      headers: { authorization: auth, accept: "application/vnd.github+json", "user-agent": "checknorris", ...init?.headers },
+      headers: { authorization: await auth(), accept: "application/vnd.github+json", "user-agent": "checknorris", ...init?.headers },
     });
     if (!r.ok) throw new Error(`${init?.method ?? "GET"} ${p}: ${r.status} ${await r.text()}`);
     return r.status === 204 ? null : r.headers.get("content-type")?.includes("json") ? r.json() : r.text();
   };
 }
 
+const appClient = client(async () => `Bearer ${appJwt()}`);
 const tokens = new Map<number, { token: string; exp: number }>();
-async function installationClient(inst: any): Promise<{ gh: Gh; token: string }> {
+// Token is re-checked on every call, so a batch or a single long review can outlive the hour-long installation token.
+async function installationToken(inst: any) {
   let t = tokens.get(inst.id);
   if (!t || t.exp < Date.now() + 60_000) {
-    const r = await client(`Bearer ${appJwt()}`)(inst.access_tokens_url, { method: "POST" });
+    const r = await appClient(inst.access_tokens_url, { method: "POST" });
     t = { token: r.token, exp: Date.parse(r.expires_at) };
     tokens.set(inst.id, t);
   }
-  return { gh: client(`token ${t.token}`), token: t.token };
+  return t.token;
+}
+function installationClient(inst: any): { gh: Gh; token: () => Promise<string> } {
+  const token = () => installationToken(inst);
+  return { gh: client(async () => `token ${await token()}`), token };
 }
 
 // --- polling ---
@@ -85,31 +91,30 @@ async function scanComments(gh: Gh, repo: string, number: number, since: string,
   db.prepare("UPDATE prs SET comments_since=? WHERE repo=? AND number=?").run(latest, repo, number);
 }
 
-export async function poll(handle: (gh: Gh, token: string, work: Work) => Promise<void>) {
-  for (const inst of await client(`Bearer ${appJwt()}`)("/app/installations")) {
-    const repos = (await (await installationClient(inst)).gh("/installation/repositories?per_page=100")).repositories;
-    for (const r of repos) {
-      const { gh, token } = await installationClient(inst); // re-checked per repo: a long batch can outlive the hour-long token
+export async function poll(handle: (gh: Gh, token: () => Promise<string>, work: Work) => Promise<void>) {
+  for (const inst of await appClient("/app/installations")) {
+    const { gh, token } = installationClient(inst);
+    for (const r of (await gh("/installation/repositories?per_page=100")).repositories) {
       const work: Work = { repo: r.full_name, reviews: [], mentions: [] };
       await scanRepo(gh, r.full_name, work).then(() => handle(gh, token, work)).catch((e) => console.error(`${r.full_name}: ${e.message}`));
     }
   }
 }
 
-export async function forRepo(repo: string): Promise<{ gh: Gh; token: string }> {
-  for (const inst of await client(`Bearer ${appJwt()}`)("/app/installations")) {
-    const c = await installationClient(inst);
+export async function forRepo(repo: string): Promise<{ gh: Gh; token: () => Promise<string> }> {
+  for (const inst of await appClient("/app/installations")) {
+    const c = installationClient(inst);
     if ((await c.gh("/installation/repositories?per_page=100")).repositories.some((r: any) => r.full_name === repo)) return c;
   }
   throw new Error(`app not installed on ${repo}`);
 }
 
 const log = (s: string) => console.log(`${new Date().toISOString()} ${s}`);
-async function printWork(_gh: Gh, _token: string, w: Work) {
+async function printWork(_gh: Gh, _token: unknown, w: Work) {
   for (const r of w.reviews) log(`review   ${r.repo}#${r.number} @ ${r.head_sha.slice(0, 7)}`);
   for (const m of w.mentions) log(`mention  ${m.repo}#${m.number} ${m.author} (${m.kind}): ${m.body.split("\n")[0].slice(0, 80)}`);
 }
-async function doWork(gh: Gh, token: string, w: Work) {
+async function doWork(gh: Gh, token: () => Promise<string>, w: Work) {
   await printWork(gh, token, w);
   for (const r of w.reviews) {
     await reviewPr(gh, token, r.repo, r.number)

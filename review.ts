@@ -19,12 +19,14 @@ function git(dir: string, args: string[], token?: string) {
   try {
     return execFileSync("git", [...auth, ...args], { cwd: dir, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 << 20 });
   } catch (e: any) {
-    throw new Error(`git ${args[0]}: ${String(e.stderr || e.message).trim().slice(0, 300)}`);
+    const msg = String(e.stderr || e.message).trim().slice(0, 300);
+    throw new Error(`git ${args[0]}: ${/Authentication failed|HTTP 401|could not read Username/i.test(msg) ? "401 " : ""}${msg}`);
   }
 }
 
 // ponytail: one clone per repo, checked out in place; reviews run one at a time so no worktrees.
-function checkout(repo: string, sha: string, baseSha: string, token: string) {
+async function checkout(repo: string, sha: string, baseSha: string, getToken: () => Promise<string>) {
+  const token = await getToken();
   const dir = path.join(root, "checkouts", repo.replace("/", "__"));
   if (!fs.existsSync(path.join(dir, ".git"))) {
     fs.mkdirSync(dir, { recursive: true });
@@ -94,7 +96,8 @@ async function agent(dir: string, system: string, user: string) {
 }
 
 // Instructions come from the PR's base commit, not its head: a PR must not be able to rewrite its own reviewer's rules.
-function repoInstructions(dir: string, baseSha: string, token: string) {
+async function repoInstructions(dir: string, baseSha: string, getToken: () => Promise<string>) {
+  const token = await getToken();
   for (const f of [".checknorris.md", "AGENTS.md", "CLAUDE.md"]) {
     try { return `\n\n# Repository instructions (${f})\n${git(dir, ["show", `${baseSha}:${f}`], token).slice(0, 20_000)}`; } catch {}
   }
@@ -117,14 +120,14 @@ function priorFindings(repo: string, number: number) {
 }
 
 // --- public entry points ---
-export async function reviewPr(gh: Gh, token: string, repo: string, number: number) {
+export async function reviewPr(gh: Gh, token: () => Promise<string>, repo: string, number: number) {
   const started = Date.now();
   const pr = await gh(`/repos/${repo}/pulls/${number}`);
   const sha = pr.head.sha;
-  const dir = checkout(repo, sha, pr.base.sha, token);
+  const dir = await checkout(repo, sha, pr.base.sha, token);
   const diff = await gh(`/repos/${repo}/pulls/${number}`, { headers: { accept: "application/vnd.github.diff" } });
   const user = `# PR #${number}: ${pr.title}\nAuthor: ${pr.user.login}. Base: ${pr.base.ref}. Head: ${sha}.\n\n${pr.body ?? ""}\n\n# Diff\n\`\`\`diff\n${String(diff).slice(0, 200_000)}\n\`\`\``;
-  const out = await agent(dir, SYSTEM + repoInstructions(dir, pr.base.sha, token) + priorFindings(repo, number), user);
+  const out = await agent(dir, SYSTEM + (await repoInstructions(dir, pr.base.sha, token)) + priorFindings(repo, number), user);
   const comments: any[] = out.comments ?? [];
   let score = Math.min(5, Math.max(1, Math.round(out.score ?? 3)));
   if (score === 5 && comments.some((c) => c.severity !== "P2")) score = 4;
@@ -151,10 +154,10 @@ async function postReview(gh: Gh, repo: string, number: number, sha: string, app
   }
 }
 
-export async function replyToMention(gh: Gh, token: string, m: { id: number; repo: string; number: number; kind: string; author: string; body: string }) {
+export async function replyToMention(gh: Gh, token: () => Promise<string>, m: { id: number; repo: string; number: number; kind: string; author: string; body: string }) {
   const started = Date.now();
   const pr = await gh(`/repos/${m.repo}/pulls/${m.number}`);
-  const dir = checkout(m.repo, pr.head.sha, pr.base.sha, token);
+  const dir = await checkout(m.repo, pr.head.sha, pr.base.sha, token);
   let context = "", threadId = m.id;
   if (m.kind === "review") {
     const c = await gh(`/repos/${m.repo}/pulls/comments/${m.id}`);
@@ -164,7 +167,7 @@ export async function replyToMention(gh: Gh, token: string, m: { id: number; rep
   }
   const rereview = /re-?review|review again|take another look/i.test(m.body);
   const user = `# PR #${m.number}: ${pr.title}\nHead: ${pr.head.sha}.\n${context}\n@${m.author} wrote:\n> ${m.body.replaceAll("\n", "\n> ")}\n\nAnswer them directly and briefly, using the tools to check the code first. Put the reply in \`summary\`.${rereview ? " A fresh full review is already being scheduled; say so." : ""}`;
-  const out = await agent(dir, SYSTEM + repoInstructions(dir, pr.base.sha, token) + priorFindings(m.repo, m.number), user);
+  const out = await agent(dir, SYSTEM + (await repoInstructions(dir, pr.base.sha, token)) + priorFindings(m.repo, m.number), user);
   const reply = `${out.summary}\n\n<sub>Check Norris · ${config.llm.model}</sub>`;
   if (m.kind === "review") await gh(`/repos/${m.repo}/pulls/${m.number}/comments/${threadId}/replies`, { method: "POST", body: JSON.stringify({ body: reply }) });
   else await gh(`/repos/${m.repo}/issues/${m.number}/comments`, { method: "POST", body: JSON.stringify({ body: reply }) });

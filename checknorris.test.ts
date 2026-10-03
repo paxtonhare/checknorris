@@ -35,3 +35,13 @@ test("mentions: @bot, replies to bot; ignores bot's own and old comments; no rep
   state["/repos/o/r/pulls?"] = [pr(1, "ccc", "t4")];
   assert.deepEqual((await scan()).mentions, [], "rescanned, nothing newer than comments_since");
 });
+
+test("failed heads back off exponentially, then retry", async () => {
+  state = { "/repos/o/r/pulls?": [pr(3, "fff", "t1")], "/repos/o/r/issues/3/comments": [], "/repos/o/r/pulls/3/comments": [] };
+  assert.equal((await scan()).reviews.length, 1);
+  const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
+  db.prepare("UPDATE prs SET failed_sha='fff', failures=2, failed_at=? WHERE number=3").run(at(3));
+  assert.equal((await scan()).reviews.length, 0, "2 failures: wait 4 minutes");
+  db.prepare("UPDATE prs SET failed_at=? WHERE number=3").run(at(5));
+  assert.equal((await scan()).reviews.length, 1, "backoff elapsed");
+});

@@ -2,7 +2,7 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { bot, config, db, type Gh } from "./common.ts";
+import { config, db, type Gh } from "./common.ts";
 
 const root = import.meta.dirname;
 const SEVERITY = { P0: "🛑 P0", P1: "⚠️ P1", P2: "💡 P2" } as const;
@@ -136,12 +136,12 @@ export async function reviewPr(gh: Gh, token: () => Promise<string>, repo: strin
   const seconds = (Date.now() - started) / 1000, at = new Date().toISOString();
   db.prepare("INSERT INTO reviews (repo, number, head_sha, kind, score, approved, summary, comments, model, tokens_in, tokens_out, seconds, created_at) VALUES (?,?,?,'review',?,?,?,?,?,?,?,?,?)")
     .run(repo, number, sha, score, approved ? 1 : 0, out.summary, JSON.stringify(comments), config.llm.model, out.tokens_in, out.tokens_out, seconds, at);
-  await upsertSummary(gh, repo, number, sha);
-  await postReview(gh, repo, number, sha, approved, comments);
-  await gh(`/repos/${repo}/statuses/${sha}`, { method: "POST", body: JSON.stringify({ context: "checknorris", state: approved ? "success" : "failure", description: `Score ${score}/5` }) });
   db.prepare(`INSERT INTO prs (repo, number, title, url, author, state, head_sha, updated_at, comments_since, reviewed_sha)
     VALUES (?,?,?,?,?,'open',?,?,?,?) ON CONFLICT(repo, number) DO UPDATE SET reviewed_sha=excluded.reviewed_sha, failed_sha=NULL, failures=0`)
     .run(repo, number, pr.title, pr.html_url, pr.user.login, sha, pr.updated_at, pr.created_at, sha);
+  await upsertSummary(gh, repo, number, sha);
+  await postReview(gh, repo, number, sha, approved, comments);
+  await gh(`/repos/${repo}/statuses/${sha}`, { method: "POST", body: JSON.stringify({ context: "checknorris", state: approved ? "success" : "failure", description: `Score ${score}/5` }) });
   return { score, approved, comments: comments.length, seconds };
 }
 
@@ -165,9 +165,10 @@ ${findings.length ? "\n" + findings.map((c) => `- **${c.severity}** \`${c.path}:
 |---|---|---|
 ${runs.slice(1).map((x) => `| ${commit(x.head_sha)} | ${x.score}/5${x.approved ? " ✓" : ""} | ${when(x.created_at)} |`).join("\n")}
 </details>` : ""}`;
-  const existing = (await gh(`/repos/${repo}/issues/${number}/comments?per_page=100`)).find((c: any) => c.user.login === bot && c.body.startsWith(MARK));
-  if (existing) await gh(`/repos/${repo}/issues/comments/${existing.id}`, { method: "PATCH", body: JSON.stringify({ body }) });
-  else await gh(`/repos/${repo}/issues/${number}/comments`, { method: "POST", body: JSON.stringify({ body }) });
+  const id = (db.prepare("SELECT summary_comment_id id FROM prs WHERE repo=? AND number=?").get(repo, number) as any)?.id;
+  if (id && await gh(`/repos/${repo}/issues/comments/${id}`, { method: "PATCH", body: JSON.stringify({ body }) }).then(() => true, (e) => { if (!/404/.test(e.message)) throw e; return false; })) return;
+  const c = await gh(`/repos/${repo}/issues/${number}/comments`, { method: "POST", body: JSON.stringify({ body }) }); // first review, or the comment was deleted
+  db.prepare("UPDATE prs SET summary_comment_id=? WHERE repo=? AND number=?").run(c.id, repo, number);
 }
 
 // The review itself carries only the approval and inline comments; the summary comment has the verdict.

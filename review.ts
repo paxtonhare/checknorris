@@ -45,6 +45,7 @@ const tools = [
   { name: "done", description: "Finish. For a review: give the score, summary and findings. For a mention reply: give the reply text in summary.", parameters: { type: "object", properties: {
     score: { type: "integer", minimum: 1, maximum: 5 },
     summary: { type: "string", description: "Markdown. Short: what the PR does, overall assessment, anything not expressible as an inline comment." },
+    rationale: { type: "string", description: "Markdown bullets, 1-4 lines. Why exactly this score: which findings hold it down (cite them) and what would make it a 5. For a 5, what you checked that gave you confidence. Reviews only." },
     comments: { type: "array", items: { type: "object", properties: { path: { type: "string" }, line: { type: "integer", description: "line number in the NEW file version; must be inside the diff" }, severity: { type: "string", enum: ["P0", "P1", "P2"] }, body: { type: "string" } }, required: ["path", "line", "severity", "body"] } },
   }, required: ["summary"] } },
 ].map((f) => ({ type: "function", function: f }));
@@ -109,6 +110,7 @@ Review for material issues only: correctness, security, data loss, regressions, 
 Read beyond the diff: check callers, tests, and related code before asserting a problem. Every finding must cite evidence you actually read.
 Severity: P0 = must fix before merge (bug, security, data loss). P1 = should fix (likely bug, missing safeguard, standard violation). P2 = minor, optional.
 Score 1-5: 5 = merge as-is, no P0/P1 findings. 4 = minor fixes. 3 = needs work. 2 = significant problems. 1 = do not merge.
+Missing tests alone never take a PR below 4. The rationale must make the score obvious to someone who reads only it: name the findings that cost points and say concretely what a 5 would need.
 Inline comments must point at a line in the NEW version of a file that appears in the diff. Put anything else in the summary.
 Call \`done\` exactly once when finished.`;
 
@@ -134,8 +136,8 @@ export async function reviewPr(gh: Gh, token: () => Promise<string>, repo: strin
   if (score === 5 && comments.some((c) => c.severity !== "P2")) score = 4;
   const approved = !truncated && score >= (config.approveThreshold ?? 5); // never approve on an incomplete diff
   const seconds = (Date.now() - started) / 1000, at = new Date().toISOString();
-  db.prepare("INSERT INTO reviews (repo, number, head_sha, kind, score, approved, summary, comments, model, tokens_in, tokens_out, seconds, created_at) VALUES (?,?,?,'review',?,?,?,?,?,?,?,?,?)")
-    .run(repo, number, sha, score, approved ? 1 : 0, out.summary, JSON.stringify(comments), config.llm.model, out.tokens_in, out.tokens_out, seconds, at);
+  db.prepare("INSERT INTO reviews (repo, number, head_sha, kind, score, approved, summary, rationale, comments, model, tokens_in, tokens_out, seconds, created_at) VALUES (?,?,?,'review',?,?,?,?,?,?,?,?,?,?)")
+    .run(repo, number, sha, score, approved ? 1 : 0, out.summary, out.rationale ?? "", JSON.stringify(comments), config.llm.model, out.tokens_in, out.tokens_out, seconds, at);
   db.prepare("INSERT OR IGNORE INTO prs (repo, number, title, url, author, state, head_sha, updated_at, comments_since) VALUES (?,?,?,?,?,'open',?,?,?)")
     .run(repo, number, pr.title, pr.html_url, pr.user.login, sha, pr.updated_at, pr.created_at); // `review` command on an unseen PR
   await upsertSummary(gh, repo, number, sha);
@@ -146,6 +148,7 @@ export async function reviewPr(gh: Gh, token: () => Promise<string>, repo: strin
 }
 
 const MARK = "<!-- checknorris-summary -->";
+export const LABEL = ["", "Do not merge", "Significant problems", "Needs work", "Minor fixes", "Merge as-is"];
 const short = (sha: string) => sha.slice(0, 7);
 const when = (iso: string) => iso.replace("T", " ").slice(0, 16) + " UTC";
 
@@ -154,17 +157,22 @@ async function upsertSummary(gh: Gh, repo: string, number: number, sha: string) 
   const runs = db.prepare("SELECT * FROM reviews WHERE repo=? AND number=? AND kind='review' ORDER BY id DESC").all(repo, number) as any[];
   const r = runs[0], findings: any[] = JSON.parse(r.comments || "[]");
   const commit = (h: string) => `[\`${short(h)}\`](https://github.com/${repo}/commit/${h})`;
-  const body = `${MARK}## ✔ Check Norris · **${r.score}/5**${r.approved ? " · Approved" : ""}
+  const body = `${MARK}## ✔ Check Norris · **${r.score}/5 · ${LABEL[r.score]}**${r.approved ? " · Approved" : ""}
 <sub>Reviewed ${commit(sha)} at ${when(r.created_at)} · ${r.model} · ${r.seconds.toFixed(0)}s</sub>
 
 ${r.summary}
+
+**Why ${r.score}/5**
+${r.rationale || "_no rationale given_"}
 ${findings.length ? "\n" + findings.map((c) => `- **${c.severity}** \`${c.path}:${c.line}\` ${c.body}`).join("\n") + "\n" : ""}${runs.length > 1 ? `
 <details><summary>Earlier reviews (${runs.length - 1})</summary>
 
 | Commit | Score | When |
 |---|---|---|
 ${runs.slice(1).map((x) => `| ${commit(x.head_sha)} | ${x.score}/5${x.approved ? " ✓" : ""} | ${when(x.created_at)} |`).join("\n")}
-</details>` : ""}`;
+</details>` : ""}
+
+<sub>5 merge as-is · 4 minor fixes · 3 needs work · 2 significant problems · 1 do not merge. Approves at ${config.approveThreshold ?? 5}.</sub>`;
   const id = (db.prepare("SELECT summary_comment_id id FROM prs WHERE repo=? AND number=?").get(repo, number) as any)?.id;
   if (id && await gh(`/repos/${repo}/issues/comments/${id}`, { method: "PATCH", body: JSON.stringify({ body }) }).then(() => true, (e) => { if (!/404/.test(e.message)) throw e; return false; })) return;
   const c = await gh(`/repos/${repo}/issues/${number}/comments`, { method: "POST", body: JSON.stringify({ body }) }); // first review, or the comment was deleted

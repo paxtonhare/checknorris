@@ -18,7 +18,7 @@ db.exec(`
     url TEXT, created_at TEXT, handled INTEGER DEFAULT 0);
 `);
 // Migrations for databases created by earlier versions. Ignore "duplicate column".
-for (const sql of ["ALTER TABLE prs ADD COLUMN failed_sha TEXT", "ALTER TABLE prs ADD COLUMN failures INTEGER DEFAULT 0", "ALTER TABLE prs ADD COLUMN failed_at TEXT", "ALTER TABLE prs ADD COLUMN summary_comment_id INTEGER"]) { try { db.exec(sql); } catch {} }
+for (const sql of ["ALTER TABLE prs ADD COLUMN failed_sha TEXT", "ALTER TABLE prs ADD COLUMN failures INTEGER DEFAULT 0", "ALTER TABLE prs ADD COLUMN failed_at TEXT", "ALTER TABLE prs ADD COLUMN summary_comment_id INTEGER", "ALTER TABLE reviews ADD COLUMN rationale TEXT"]) { try { db.exec(sql); } catch {} }
 
 
 export type Gh = (p: string, init?: RequestInit) => Promise<any>;

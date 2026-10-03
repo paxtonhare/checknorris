@@ -133,25 +133,52 @@ export async function reviewPr(gh: Gh, token: () => Promise<string>, repo: strin
   let score = Math.min(5, Math.max(1, Math.round(out.score ?? 3)));
   if (score === 5 && comments.some((c) => c.severity !== "P2")) score = 4;
   const approved = !truncated && score >= (config.approveThreshold ?? 5); // never approve on an incomplete diff
-  const body = `${out.summary}\n\n**Score: ${score}/5**${approved ? " · Approved" : ""}\n\n<sub>Check Norris · ${config.llm.model}</sub>`;
-  await postReview(gh, repo, number, sha, approved, body, comments);
-  await gh(`/repos/${repo}/statuses/${sha}`, { method: "POST", body: JSON.stringify({ context: "checknorris", state: approved ? "success" : "failure", description: `Score ${score}/5` }) });
-  const seconds = (Date.now() - started) / 1000;
+  const seconds = (Date.now() - started) / 1000, at = new Date().toISOString();
   db.prepare("INSERT INTO reviews (repo, number, head_sha, kind, score, approved, summary, comments, model, tokens_in, tokens_out, seconds, created_at) VALUES (?,?,?,'review',?,?,?,?,?,?,?,?,?)")
-    .run(repo, number, sha, score, approved ? 1 : 0, out.summary, JSON.stringify(comments), config.llm.model, out.tokens_in, out.tokens_out, seconds, new Date().toISOString());
-  db.prepare(`INSERT INTO prs (repo, number, title, url, author, state, head_sha, updated_at, comments_since, reviewed_sha)
-    VALUES (?,?,?,?,?,'open',?,?,?,?) ON CONFLICT(repo, number) DO UPDATE SET reviewed_sha=excluded.reviewed_sha, failed_sha=NULL, failures=0`)
-    .run(repo, number, pr.title, pr.html_url, pr.user.login, sha, pr.updated_at, pr.created_at, sha);
+    .run(repo, number, sha, score, approved ? 1 : 0, out.summary, JSON.stringify(comments), config.llm.model, out.tokens_in, out.tokens_out, seconds, at);
+  db.prepare("INSERT OR IGNORE INTO prs (repo, number, title, url, author, state, head_sha, updated_at, comments_since) VALUES (?,?,?,?,?,'open',?,?,?)")
+    .run(repo, number, pr.title, pr.html_url, pr.user.login, sha, pr.updated_at, pr.created_at); // `review` command on an unseen PR
+  await upsertSummary(gh, repo, number, sha);
+  await postReview(gh, repo, number, sha, approved, comments);
+  await gh(`/repos/${repo}/statuses/${sha}`, { method: "POST", body: JSON.stringify({ context: "checknorris", state: approved ? "success" : "failure", description: `Score ${score}/5` }) });
+  db.prepare("UPDATE prs SET reviewed_sha=?, failed_sha=NULL, failures=0 WHERE repo=? AND number=?").run(sha, repo, number); // only once everything is published
   return { score, approved, comments: comments.length, seconds };
 }
 
-async function postReview(gh: Gh, repo: string, number: number, sha: string, approved: boolean, body: string, comments: any[]) {
+const MARK = "<!-- checknorris-summary -->";
+const short = (sha: string) => sha.slice(0, 7);
+const when = (iso: string) => iso.replace("T", " ").slice(0, 16) + " UTC";
+
+// One summary comment per PR, edited in place on every review, so the timeline is not a pile of stale verdicts.
+async function upsertSummary(gh: Gh, repo: string, number: number, sha: string) {
+  const runs = db.prepare("SELECT * FROM reviews WHERE repo=? AND number=? AND kind='review' ORDER BY id DESC").all(repo, number) as any[];
+  const r = runs[0], findings: any[] = JSON.parse(r.comments || "[]");
+  const commit = (h: string) => `[\`${short(h)}\`](https://github.com/${repo}/commit/${h})`;
+  const body = `${MARK}## ✔ Check Norris · **${r.score}/5**${r.approved ? " · Approved" : ""}
+<sub>Reviewed ${commit(sha)} at ${when(r.created_at)} · ${r.model} · ${r.seconds.toFixed(0)}s</sub>
+
+${r.summary}
+${findings.length ? "\n" + findings.map((c) => `- **${c.severity}** \`${c.path}:${c.line}\` ${c.body}`).join("\n") + "\n" : ""}${runs.length > 1 ? `
+<details><summary>Earlier reviews (${runs.length - 1})</summary>
+
+| Commit | Score | When |
+|---|---|---|
+${runs.slice(1).map((x) => `| ${commit(x.head_sha)} | ${x.score}/5${x.approved ? " ✓" : ""} | ${when(x.created_at)} |`).join("\n")}
+</details>` : ""}`;
+  const id = (db.prepare("SELECT summary_comment_id id FROM prs WHERE repo=? AND number=?").get(repo, number) as any)?.id;
+  if (id && await gh(`/repos/${repo}/issues/comments/${id}`, { method: "PATCH", body: JSON.stringify({ body }) }).then(() => true, (e) => { if (!/404/.test(e.message)) throw e; return false; })) return;
+  const c = await gh(`/repos/${repo}/issues/${number}/comments`, { method: "POST", body: JSON.stringify({ body }) }); // first review, or the comment was deleted
+  db.prepare("UPDATE prs SET summary_comment_id=? WHERE repo=? AND number=?").run(c.id, repo, number);
+}
+
+// The review itself carries only the approval and inline comments; the summary comment has the verdict.
+async function postReview(gh: Gh, repo: string, number: number, sha: string, approved: boolean, comments: any[]) {
   const inline = comments.map((c) => ({ path: c.path, line: c.line, side: "RIGHT", body: `**${SEVERITY[c.severity as keyof typeof SEVERITY] ?? c.severity}** ${c.body}` }));
-  const post = (cs: any[], extra = "") => gh(`/repos/${repo}/pulls/${number}/reviews`, { method: "POST", body: JSON.stringify({ commit_id: sha, event: approved ? "APPROVE" : "COMMENT", body: body + extra, comments: cs }) });
+  const post = (cs: any[]) => gh(`/repos/${repo}/pulls/${number}/reviews`, { method: "POST", body: JSON.stringify({ commit_id: sha, event: approved ? "APPROVE" : "COMMENT", body: approved ? "" : `Findings for ${short(sha)}; verdict in the Check Norris summary comment.`, comments: cs }) });
+  if (!approved && !inline.length) return;
   try { await post(inline); } catch (e: any) {
     if (!/422/.test(e.message)) throw e;
-    // A comment outside the diff rejects the whole review; fall back to listing findings in the body.
-    await post([], "\n\n" + comments.map((c) => `- **${c.severity}** \`${c.path}:${c.line}\` ${c.body}`).join("\n"));
+    if (approved) await post([]); // a comment outside the diff rejects the whole review; findings are already in the summary
   }
 }
 

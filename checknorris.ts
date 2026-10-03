@@ -89,6 +89,7 @@ async function scanComments(gh: Gh, repo: string, number: number, since: string,
     if (!addressed) continue;
     const ins = db.prepare("INSERT OR IGNORE INTO mentions (id, repo, number, kind, author, body, url, created_at) VALUES (?,?,?,?,?,?,?,?)")
       .run(c.id, repo, number, c.kind, c.user.login, c.body, c.html_url, c.created_at);
+    if (ins.changes) await gh(`/repos/${repo}/${c.kind === "issue" ? "issues" : "pulls"}/comments/${c.id}/reactions`, { method: "POST", body: JSON.stringify({ content: "eyes" }) }).catch(() => {});
     if (ins.changes) work.mentions.push({ id: c.id, repo, number, kind: c.kind, author: c.user.login, body: c.body });
   }
   db.prepare("UPDATE prs SET comments_since=? WHERE repo=? AND number=?").run(latest, repo, number);

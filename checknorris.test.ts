@@ -9,7 +9,7 @@ const pr = (n: number, sha: string, updated: string, extra = {}) =>
 const comment = (id: number, login: string, body: string, created_at: string, extra = {}) => ({ id, user: { login }, body, created_at, html_url: `c${id}`, ...extra });
 
 let state: Record<string, any> = {};
-const gh = async (p: string) => { const k = Object.keys(state).find((k) => p.startsWith(k)); if (!k) throw new Error(`unexpected ${p}`); return state[k]; };
+const gh = async (p: string, init?: any) => { if (init?.method === "POST") return {}; const k = Object.keys(state).find((k) => p.startsWith(k)); if (!k) throw new Error(`unexpected ${p}`); return state[k]; };
 const scan = async () => { const w = { repo: "o/r", reviews: [], mentions: [] as any[] }; await scanRepo(gh, "o/r", w); return w; };
 
 test("new PR needs review; drafts and reviewed heads do not", async () => {

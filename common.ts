@@ -11,14 +11,14 @@ export const db = new DatabaseSync(dbPath === ":memory:" ? dbPath : path.join(ro
 db.exec(`
   CREATE TABLE IF NOT EXISTS prs (
     repo TEXT, number INTEGER, title TEXT, url TEXT, author TEXT, state TEXT,
-    head_sha TEXT, updated_at TEXT, reviewed_sha TEXT, failed_sha TEXT, failures INTEGER DEFAULT 0, failed_at TEXT, comments_since TEXT,
+    head_sha TEXT, updated_at TEXT, reviewed_sha TEXT, failed_sha TEXT, failures INTEGER DEFAULT 0, failed_at TEXT, summary_comment_id INTEGER, comments_since TEXT,
     PRIMARY KEY (repo, number));
   CREATE TABLE IF NOT EXISTS mentions (
     id INTEGER PRIMARY KEY, repo TEXT, number INTEGER, kind TEXT, author TEXT, body TEXT,
     url TEXT, created_at TEXT, handled INTEGER DEFAULT 0);
 `);
 // Migrations for databases created by earlier versions. Ignore "duplicate column".
-for (const sql of ["ALTER TABLE prs ADD COLUMN failed_sha TEXT", "ALTER TABLE prs ADD COLUMN failures INTEGER DEFAULT 0", "ALTER TABLE prs ADD COLUMN failed_at TEXT"]) { try { db.exec(sql); } catch {} }
+for (const sql of ["ALTER TABLE prs ADD COLUMN failed_sha TEXT", "ALTER TABLE prs ADD COLUMN failures INTEGER DEFAULT 0", "ALTER TABLE prs ADD COLUMN failed_at TEXT", "ALTER TABLE prs ADD COLUMN summary_comment_id INTEGER"]) { try { db.exec(sql); } catch {} }
 
 
 export type Gh = (p: string, init?: RequestInit) => Promise<any>;

@@ -125,7 +125,7 @@ export async function reviewPr(gh: Gh, token: () => Promise<string>, repo: strin
   const pr = await gh(`/repos/${repo}/pulls/${number}`);
   const sha = pr.head.sha;
   const dir = await checkout(repo, sha, pr.base.sha, token);
-  const diff = await gh(`/repos/${repo}/pulls/${number}`, { headers: { accept: "application/vnd.github.diff" } });
+  const diff = await gh(`/repos/${repo}/compare/${pr.base.sha}...${sha}`, { headers: { accept: "application/vnd.github.diff" } }); // pinned to the checked-out head
   const user = `# PR #${number}: ${pr.title}\nAuthor: ${pr.user.login}. Base: ${pr.base.ref}. Head: ${sha}.\n\n${pr.body ?? ""}\n\n# Diff\n\`\`\`diff\n${String(diff).slice(0, 200_000)}\n\`\`\``;
   const out = await agent(dir, SYSTEM + (await repoInstructions(dir, pr.base.sha, token)) + priorFindings(repo, number), user);
   const comments: any[] = out.comments ?? [];
@@ -139,7 +139,7 @@ export async function reviewPr(gh: Gh, token: () => Promise<string>, repo: strin
   db.prepare("INSERT INTO reviews (repo, number, head_sha, kind, score, approved, summary, comments, model, tokens_in, tokens_out, seconds, created_at) VALUES (?,?,?,'review',?,?,?,?,?,?,?,?,?)")
     .run(repo, number, sha, score, approved ? 1 : 0, out.summary, JSON.stringify(comments), config.llm.model, out.tokens_in, out.tokens_out, seconds, new Date().toISOString());
   db.prepare(`INSERT INTO prs (repo, number, title, url, author, state, head_sha, updated_at, comments_since, reviewed_sha)
-    VALUES (?,?,?,?,?,'open',?,?,?,?) ON CONFLICT(repo, number) DO UPDATE SET reviewed_sha=excluded.reviewed_sha, failed_sha=NULL`)
+    VALUES (?,?,?,?,?,'open',?,?,?,?) ON CONFLICT(repo, number) DO UPDATE SET reviewed_sha=excluded.reviewed_sha, failed_sha=NULL, failures=0`)
     .run(repo, number, pr.title, pr.html_url, pr.user.login, sha, pr.updated_at, pr.created_at, sha);
   return { score, approved, comments: comments.length, seconds };
 }

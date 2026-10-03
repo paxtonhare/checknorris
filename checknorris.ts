@@ -66,7 +66,8 @@ export async function scanRepo(gh: Gh, repo: string, work: Work) {
       title=excluded.title, state='open', head_sha=excluded.head_sha, updated_at=excluded.updated_at`)
       .run(repo, pr.number, pr.title, pr.html_url, pr.user.login, pr.head.sha, pr.updated_at, row?.comments_since ?? pr.created_at);
     if (pr.draft) continue;
-    if (row?.reviewed_sha !== pr.head.sha && row?.failed_sha !== pr.head.sha) work.reviews.push({ repo, number: pr.number, head_sha: pr.head.sha });
+    // ponytail: up to 3 attempts per head, then give up until the next push (or a re-run); no transient/permanent classification.
+    if (row?.reviewed_sha !== pr.head.sha && !(row?.failed_sha === pr.head.sha && row.failures >= 3)) work.reviews.push({ repo, number: pr.number, head_sha: pr.head.sha });
     if (!row || row.updated_at !== pr.updated_at) await scanComments(gh, repo, pr.number, row?.comments_since ?? pr.created_at, work);
   }
 }
@@ -119,13 +120,13 @@ async function doWork(gh: Gh, token: () => Promise<string>, w: Work) {
   for (const r of w.reviews) {
     await reviewPr(gh, token, r.repo, r.number)
       .then((o) => log(`reviewed ${r.repo}#${r.number}: ${o.score}/5${o.approved ? " approved" : ""}, ${o.comments} comments, ${o.seconds.toFixed(0)}s`))
-      .catch((e) => { log(`review failed ${r.repo}#${r.number}: ${e.message}`); if (!/\b401\b/.test(e.message)) db.prepare("UPDATE prs SET failed_sha=? WHERE repo=? AND number=?").run(r.head_sha, r.repo, r.number); });
+      .catch((e) => { log(`review failed ${r.repo}#${r.number}: ${e.message}`); if (!/\b401\b/.test(e.message)) db.prepare("UPDATE prs SET failures=CASE WHEN failed_sha=? THEN failures+1 ELSE 1 END, failed_sha=? WHERE repo=? AND number=?").run(r.head_sha, r.head_sha, r.repo, r.number); });
   }
   // From the DB, not w.mentions: a mention scanned by `once` or before a crash is still owed a reply.
-  for (const m of db.prepare("SELECT id, repo, number, kind, author, body FROM mentions WHERE repo=? AND handled=0").all(w.repo) as Work["mentions"]) {
+  for (const m of db.prepare("SELECT id, repo, number, kind, author, body FROM mentions WHERE repo=? AND handled<=0 AND handled>-3").all(w.repo) as Work["mentions"]) {
     await replyToMention(gh, token, m)
       .then(() => log(`replied  ${m.repo}#${m.number} to ${m.author}`))
-      .catch((e) => { log(`reply failed ${m.repo}#${m.number}: ${e.message}`); if (!/\b401\b/.test(e.message)) db.prepare("UPDATE mentions SET handled=-1 WHERE id=?").run(m.id); });
+      .catch((e) => { log(`reply failed ${m.repo}#${m.number}: ${e.message}`); if (!/\b401\b/.test(e.message)) db.prepare("UPDATE mentions SET handled=handled-1 WHERE id=?").run(m.id); }); // handled: 1 done, 0..-2 pending, -3 given up
   }
 }
 
@@ -133,7 +134,7 @@ if (import.meta.main) {
   const cmd = process.argv[2] ?? "loop";
   if (cmd === "list") {
     for (const p of db.prepare("SELECT * FROM prs ORDER BY state, repo, number").all() as any[])
-      console.log(`${p.state.padEnd(6)} ${p.repo}#${p.number} ${p.head_sha.slice(0, 7)} ${p.reviewed_sha === p.head_sha ? "reviewed" : p.failed_sha === p.head_sha ? "failed  " : "pending "} ${p.title}`);
+      console.log(`${p.state.padEnd(6)} ${p.repo}#${p.number} ${p.head_sha.slice(0, 7)} ${p.reviewed_sha === p.head_sha ? "reviewed" : p.failed_sha === p.head_sha ? `failed×${p.failures}` : "pending "} ${p.title}`);
     for (const m of db.prepare("SELECT * FROM mentions WHERE handled=0").all() as any[])
       console.log(`mention ${m.repo}#${m.number} ${m.author}: ${m.body.split("\n")[0].slice(0, 80)}`);
   } else if (cmd === "once") {

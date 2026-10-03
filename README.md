@@ -1,3 +1,5 @@
+<img src="icon.png" width="96" align="right" alt="">
+
 # Check Norris
 
 Self-hosted AI pull request reviewer. Greptile-style reviews and approvals from

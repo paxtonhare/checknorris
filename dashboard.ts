@@ -1,6 +1,8 @@
 // Dashboard: one page listing PRs and their latest review, one page per PR, a re-run button.
 // No auth: bind to localhost and expose over Tailscale (tailscale serve) or another private network.
+import fs from "node:fs";
 import http from "node:http";
+import path from "node:path";
 import { config, db } from "./common.ts";
 import { LABEL } from "./review.ts";
 
@@ -8,7 +10,7 @@ const esc = (s: unknown) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&
 const ago = (iso?: string) => { if (!iso) return ""; const m = (Date.now() - Date.parse(iso)) / 60_000; return m < 60 ? `${m | 0}m` : m < 1440 ? `${(m / 60) | 0}h` : `${(m / 1440) | 0}d`; };
 const score = (r: any) => r?.score == null ? "" : `<b class="s${r.score}">${r.score}/5</b> <span class="mute">${LABEL[r.score]}</span>${r.approved ? " ✓" : ""}`;
 
-const page = (title: string, body: string) => `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${esc(title)} · Check Norris</title>
+const page = (title: string, body: string) => `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>${esc(title)} · Check Norris</title><link rel="icon" href="/icon.png">
 <style>
 :root{color-scheme:light dark;--fg:#1a1a1a;--bg:#fff;--mute:#777;--line:#ddd;--ok:#1a7f37;--warn:#9a6700;--bad:#cf222e}
 @media(prefers-color-scheme:dark){:root{--fg:#e6e6e6;--bg:#111;--mute:#999;--line:#333;--ok:#3fb950;--warn:#d29922;--bad:#f85149}}
@@ -17,7 +19,7 @@ a{color:inherit}table{width:100%;border-collapse:collapse}td,th{text-align:left;
 th{color:var(--mute);font-weight:500}.mute{color:var(--mute)}.s5{color:var(--ok)}.s4{color:var(--ok)}.s3{color:var(--warn)}.s2,.s1{color:var(--bad)}
 pre,.body{white-space:pre-wrap;word-break:break-word;background:color-mix(in srgb,var(--fg) 5%,transparent);padding:.6rem .8rem;border-radius:6px}
 button{font:inherit;padding:.3rem .7rem;cursor:pointer}h1{font-size:1.3rem}h2{font-size:1.1rem;margin-top:2rem}.c{margin:.6rem 0 .6rem 1rem}
-</style><h1><a href="/" style="text-decoration:none">✔ Check Norris</a> <span class="mute" style="font-weight:400;font-size:.9rem">${esc(config.llm.model)}</span></h1>${body}`;
+</style><h1 style="display:flex;align-items:center;gap:.6rem"><img src="/icon.png" width="36" height="36" alt="" style="border-radius:8px"><a href="/" style="text-decoration:none">Check Norris</a> <span class="mute" style="font-weight:400;font-size:.9rem">${esc(config.llm.model)}</span></h1>${body}`;
 
 function index() {
   const prs = db.prepare(`SELECT p.*, r.score, r.approved, r.created_at reviewed_at, r.seconds, r.tokens_in, r.tokens_out,
@@ -52,6 +54,7 @@ export function serve() {
     const url = new URL(req.url!, "http://x");
     const send = (code: number, html: string | null, headers: Record<string, string> = {}) => { res.writeHead(code, { "content-type": "text/html; charset=utf-8", ...headers }); res.end(html); };
     if (req.method === "GET" && url.pathname === "/") return send(200, index());
+    if (req.method === "GET" && url.pathname === "/icon.png") { res.writeHead(200, { "content-type": "image/png", "cache-control": "max-age=86400" }); return res.end(fs.readFileSync(path.join(import.meta.dirname, "icon.png"))); }
     const m = url.pathname.match(/^\/pr\/([^/]+\/[^/]+)\/(\d+)$/);
     if (req.method === "GET" && m) { const html = pr(m[1], Number(m[2])); return html ? send(200, html) : send(404, "not found"); }
     if (req.method === "POST" && url.pathname === "/rerun") {

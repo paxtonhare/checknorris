@@ -66,8 +66,8 @@ export async function scanRepo(gh: Gh, repo: string, work: Work) {
       title=excluded.title, state='open', head_sha=excluded.head_sha, updated_at=excluded.updated_at`)
       .run(repo, pr.number, pr.title, pr.html_url, pr.user.login, pr.head.sha, pr.updated_at, row?.comments_since ?? pr.created_at);
     if (pr.draft) continue;
-    // Failed heads retry with exponential backoff (2^failures minutes), never abandoned: outages recover, hard failures settle at ~daily.
-    const backoff = row?.failed_sha === pr.head.sha && Date.now() - Date.parse(row.failed_at) < 2 ** row.failures * 60_000;
+    // Failed heads retry with exponential backoff (2^failures minutes, capped at ~17h), never abandoned.
+    const backoff = row?.failed_sha === pr.head.sha && Date.now() - Date.parse(row.failed_at) < 2 ** Math.min(row.failures, 10) * 60_000;
     if (row?.reviewed_sha !== pr.head.sha && !backoff) work.reviews.push({ repo, number: pr.number, head_sha: pr.head.sha });
     if (!row || row.updated_at !== pr.updated_at) await scanComments(gh, repo, pr.number, row?.comments_since ?? pr.created_at, work);
   }

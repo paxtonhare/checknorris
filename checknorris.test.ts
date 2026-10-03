@@ -45,3 +45,9 @@ test("failed heads back off exponentially, then retry", async () => {
   db.prepare("UPDATE prs SET failed_at=? WHERE number=3").run(at(5));
   assert.equal((await scan()).reviews.length, 1, "backoff elapsed");
 });
+
+test("backoff is capped at 2^10 minutes", async () => {
+  const at = (minutesAgo: number) => new Date(Date.now() - minutesAgo * 60_000).toISOString();
+  db.prepare("UPDATE prs SET failed_sha='fff', failures=30, failed_at=? WHERE number=3").run(at(1025));
+  assert.equal((await scan()).reviews.length, 1);
+});

@@ -7,10 +7,6 @@ import { config, db, type Gh } from "./common.ts";
 const root = import.meta.dirname;
 const SEVERITY = { P0: "🛑 P0", P1: "⚠️ P1", P2: "💡 P2" } as const;
 
-db.exec(`CREATE TABLE IF NOT EXISTS reviews (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, repo TEXT, number INTEGER, head_sha TEXT, kind TEXT, score INTEGER, approved INTEGER,
-  summary TEXT, comments TEXT, model TEXT, tokens_in INTEGER, tokens_out INTEGER, seconds REAL, created_at TEXT)`);
-
 // --- checkout ---
 function git(dir: string, args: string[], token?: string) {
   const auth = token ? ["-c", `http.extraheader=AUTHORIZATION: basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`] : [];

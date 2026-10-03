@@ -126,11 +126,12 @@ export async function reviewPr(gh: Gh, token: () => Promise<string>, repo: strin
   const sha = pr.head.sha;
   const dir = await checkout(repo, sha, pr.base.sha, token);
   const diff = await gh(`/repos/${repo}/compare/${pr.base.sha}...${sha}`, { headers: { accept: "application/vnd.github.diff" } }); // pinned to the checked-out head
-  const user = `# PR #${number}: ${pr.title}\nAuthor: ${pr.user.login}. Base: ${pr.base.ref}. Head: ${sha}.\n\n${pr.body ?? ""}\n\n# Diff\n\`\`\`diff\n${String(diff).slice(0, 200_000)}\n\`\`\``;
+  const truncated = String(diff).length > 200_000;
+  const user = `# PR #${number}: ${pr.title}\nAuthor: ${pr.user.login}. Base: ${pr.base.ref}. Head: ${sha}.\n\n${pr.body ?? ""}\n\n# Diff${truncated ? " (TRUNCATED: too large to include fully; use the tools to inspect the rest and say so in the summary)" : ""}\n\`\`\`diff\n${String(diff).slice(0, 200_000)}\n\`\`\``;
   const out = await agent(dir, SYSTEM + (await repoInstructions(dir, pr.base.sha, token)) + priorFindings(repo, number), user);
   const comments: any[] = out.comments ?? [];
   let score = Math.min(5, Math.max(1, Math.round(out.score ?? 3)));
-  if (score === 5 && comments.some((c) => c.severity !== "P2")) score = 4;
+  if (score === 5 && (truncated || comments.some((c) => c.severity !== "P2"))) score = 4; // never approve on an incomplete diff
   const approved = score >= (config.approveThreshold ?? 5);
   const body = `${out.summary}\n\n**Score: ${score}/5**${approved ? " · Approved" : ""}\n\n<sub>Check Norris · ${config.llm.model}</sub>`;
   await postReview(gh, repo, number, sha, approved, body, comments);

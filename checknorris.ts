@@ -118,16 +118,17 @@ async function printWork(_gh: Gh, _token: unknown, w: Work) {
 }
 async function doWork(gh: Gh, token: () => Promise<string>, w: Work) {
   await printWork(gh, token, w);
-  for (const r of w.reviews) {
-    await reviewPr(gh, token, r.repo, r.number)
-      .then((o) => log(`reviewed ${r.repo}#${r.number}: ${o.score}/5${o.approved ? " approved" : ""}, ${o.comments} comments, ${o.seconds.toFixed(0)}s`))
-      .catch((e) => { log(`review failed ${r.repo}#${r.number}: ${e.message}`); if (!/\b401\b/.test(e.message)) db.prepare("UPDATE prs SET failures=CASE WHEN failed_sha=? THEN failures+1 ELSE 1 END, failed_sha=?, failed_at=? WHERE repo=? AND number=?").run(r.head_sha, r.head_sha, new Date().toISOString(), r.repo, r.number); });
-  }
+  // Mentions first: a pushback or re-review request should be read before the next review runs.
   // From the DB, not w.mentions: a mention scanned by `once` or before a crash is still owed a reply.
   for (const m of db.prepare("SELECT id, repo, number, kind, author, body FROM mentions WHERE repo=? AND handled<=0 AND handled>-3").all(w.repo) as Work["mentions"]) {
     await replyToMention(gh, token, m)
       .then(() => log(`replied  ${m.repo}#${m.number} to ${m.author}`))
       .catch((e) => { log(`reply failed ${m.repo}#${m.number}: ${e.message}`); if (!/\b401\b/.test(e.message)) db.prepare("UPDATE mentions SET handled=handled-1 WHERE id=?").run(m.id); }); // ponytail: handled 1 done, 0..-2 pending, -3 given up; a lost reply is low-stakes and re-mentionable
+  }
+  for (const r of w.reviews) {
+    await reviewPr(gh, token, r.repo, r.number)
+      .then((o) => log(`reviewed ${r.repo}#${r.number}: ${o.score}/5${o.approved ? " approved" : ""}, ${o.comments} comments, ${o.seconds.toFixed(0)}s`))
+      .catch((e) => { log(`review failed ${r.repo}#${r.number}: ${e.message}`); if (!/\b401\b/.test(e.message)) db.prepare("UPDATE prs SET failures=CASE WHEN failed_sha=? THEN failures+1 ELSE 1 END, failed_sha=?, failed_at=? WHERE repo=? AND number=?").run(r.head_sha, r.head_sha, new Date().toISOString(), r.repo, r.number); });
   }
 }
 

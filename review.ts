@@ -113,10 +113,10 @@ Inline comments must point at a line in the NEW version of a file that appears i
 Call \`done\` exactly once when finished.`;
 
 function priorFindings(repo: string, number: number) {
-  const rows = db.prepare("SELECT head_sha, comments, summary FROM reviews WHERE repo=? AND number=? AND kind='review' ORDER BY id DESC LIMIT 3").all(repo, number) as any[];
+  const rows = db.prepare("SELECT kind, head_sha, comments, summary FROM reviews WHERE repo=? AND number=? ORDER BY id DESC LIMIT 5").all(repo, number) as any[];
   if (!rows.length) return "";
-  return "\n\n# Your earlier reviews of this PR (do not repeat findings that are fixed; re-raise only if still present)\n" +
-    rows.map((r) => `## at ${r.head_sha.slice(0, 7)}\n${r.summary}\n${JSON.parse(r.comments || "[]").map((c: any) => `- ${c.severity} ${c.path}:${c.line} ${c.body}`).join("\n")}`).join("\n");
+  return "\n\n# Your earlier reviews and replies on this PR (do not repeat findings that are fixed or that you withdrew in a reply; re-raise only if still present)\n" +
+    rows.map((r) => `## ${r.kind} at ${r.head_sha.slice(0, 7)}\n${r.summary}\n${JSON.parse(r.comments || "[]").map((c: any) => `- ${c.severity} ${c.path}:${c.line} ${c.body}`).join("\n")}`).join("\n");
 }
 
 // --- public entry points ---

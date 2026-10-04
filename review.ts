@@ -153,7 +153,8 @@ async function upsertSummary(gh: Gh, repo: string, number: number, sha: string) 
   const runs = db.prepare("SELECT * FROM reviews WHERE repo=? AND number=? AND kind='review' ORDER BY id DESC").all(repo, number) as any[];
   const r = runs[0], findings: any[] = JSON.parse(r.comments || "[]");
   const commit = (h: string) => `[\`${short(h)}\`](https://github.com/${repo}/commit/${h})`;
-  const body = `${MARK}## ✔ Check Norris · **${r.score}/5 · ${LABEL[r.score]}**${r.approved ? " · Approved" : ""}
+  const body = `${MARK}
+## ✔ Check Norris · **${r.score}/5 · ${LABEL[r.score]}**${r.approved ? " · Approved" : ""}
 <sub>Reviewed ${commit(sha)} at ${when(r.created_at)} · ${r.model} · ${r.seconds.toFixed(0)}s</sub>
 
 ${r.summary}
